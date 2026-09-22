@@ -29,16 +29,20 @@ def init_db():
                 went_offline TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS whitelist (
-                user_id     INTEGER PRIMARY KEY,
-                username    TEXT,
-                added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS access_log (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                username     TEXT,
-                count        INTEGER DEFAULT 1,
-                last_attempt TEXT
-            );
+    user_id     INTEGER PRIMARY KEY,
+    username    TEXT,
+    added_by    INTEGER,
+    added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS access_log (
+    user_id       INTEGER PRIMARY KEY,
+    username      TEXT,
+    first_name    TEXT,
+    attempt_count INTEGER DEFAULT 0,
+    last_attempt  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    blocked       INTEGER DEFAULT 0
+);
             CREATE TABLE IF NOT EXISTS settings (
                 key          TEXT PRIMARY KEY,
                 value        TEXT

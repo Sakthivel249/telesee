@@ -1,0 +1,26 @@
+[Unit]
+Description=TG Online Tracker Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/tg-tracker
+ExecStart=/opt/tg-tracker/venv/bin/python3 bot.py
+Restart=always
+RestartSec=10
+
+# Environment
+EnvironmentFile=/opt/tg-tracker/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/tg-tracker/data /opt/tg-tracker
+
+[Install]
+WantedBy=multi-user.target

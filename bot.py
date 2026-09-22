@@ -4,8 +4,8 @@ import asyncio
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
 from dotenv import load_dotenv
+from telethon.tl import functions
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 PHONE = os.environ["TG_PHONE_PART1"] + os.environ["TG_PHONE_PART2"]
-SESSION = Path(__file__).parent / "tg-online.session"
+SESSION = Path(os.getenv("SESSION_PATH", str(Path(__file__).parent / "tg-online.session")))
 OWNER_ID = int(os.environ["OWNER_ID"])
 
 db.init_db()
@@ -286,8 +286,7 @@ def user_menu_view(lang: str, user_id: int, tracked_by: int) -> tuple[InlineKeyb
             InlineKeyboardButton(_(lang, "mute_24h"), callback_data=f"mute_{user_id}_24"),
         ])
     kb.append([InlineKeyboardButton(_(lang, "btn_user_export"), callback_data=f"export_{user_id}")])
-    if user_id != OWNER_ID:
-        kb.append([InlineKeyboardButton(_(lang, "btn_user_remove"), callback_data=f"remove_{user_id}")])
+    kb.append([InlineKeyboardButton(_(lang, "btn_user_remove"), callback_data=f"remove_{user_id}")])
     kb.append([InlineKeyboardButton(_(lang, "back"), callback_data="contacts")])
     return InlineKeyboardMarkup(kb), text
 
@@ -331,14 +330,135 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Text command handlers (for persistent command menu) ────────────────
 
 
-async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """➕ Add contact — trigger the add conversation."""
+async def cmd_add(update, context):
+    client = context.bot_data["telethon_client"]
+    current_uid = update.effective_user.id
+
+    try:
+        result = await client(functions.contacts.GetContactsRequest(
+            hash=0
+        ))
+
+        contacts = result.users
+
+        if not contacts:
+            await update.message.reply_text(
+                "❌ No Telegram contacts found."
+            )
+            return ConversationHandler.END
+
+        # Get already-tracked user IDs so we can filter them out
+        already_tracked = {u["user_id"] for u in db.get_active_users(current_uid)}
+
+        keyboard = []
+
+        for user in contacts:
+            if getattr(user, "bot", False):
+                continue
+
+            # Skip already-tracked contacts
+            if user.id in already_tracked:
+                continue
+
+            first = getattr(user, "first_name", "") or ""
+            last = getattr(user, "last_name", "") or ""
+            name = f"{first} {last}".strip()
+
+            if not name:
+                name = getattr(user, "username", None) or str(user.id)
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    name,
+                    callback_data=f"pickcontact_{user.id}"
+                )
+            ])
+
+        if not keyboard:
+            await update.message.reply_text(
+                "✅ All your Telegram contacts are already being tracked!"
+            )
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "📋 Select a Telegram contact to track:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        print(f"[add] Error getting contacts: {e}")
+
+        await update.message.reply_text(
+            f"❌ Could not load Telegram contacts: {e}"
+        )
+
+        return ConversationHandler.END
+
+async def show_telegram_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = guard(update)
     if not lang:
         await reject(update)
         return
-    await update.message.reply_text(_(lang, "add_prompt"))
-    return WAIT_USERNAME
+
+    current_uid = update.effective_user.id
+    client: TelegramClient = context.bot_data["telethon_client"]
+
+    try:
+        contacts = await asyncio.wait_for(client.get_contacts(), timeout=15)
+    except Exception as e:
+        await update.effective_message.reply_text(
+            f"❌ Could not load Telegram contacts: {e}"
+        )
+        return
+
+    # Get already-tracked user IDs so we can filter them out
+    already_tracked = {u["user_id"] for u in db.get_active_users(current_uid)}
+
+    buttons = []
+
+    for user in contacts:
+        if not getattr(user, "id", None):
+            continue
+
+        # Skip bots
+        if getattr(user, "bot", False):
+            continue
+
+        # Skip already-tracked contacts
+        if user.id in already_tracked:
+            continue
+
+        first = getattr(user, "first_name", "") or ""
+        last = getattr(user, "last_name", "") or ""
+        name = f"{first} {last}".strip()
+
+        if not name:
+            name = getattr(user, "username", None) or str(user.id)
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"👤 {name}",
+                callback_data=f"pickcontact_{user.id}"
+            )
+        ])
+
+    if not buttons:
+        await update.effective_message.reply_text(
+            "✅ All your Telegram contacts are already being tracked!",
+            reply_markup=main_menu(lang)
+        )
+        return
+
+    buttons.append([
+        InlineKeyboardButton("❌ Cancel", callback_data="menu")
+    ])
+
+    await update.effective_message.reply_text(
+        "📋 Select a Telegram contact to track:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 async def cmd_getall(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,6 +514,111 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.answer("⚠️ Error. Try /start.")
         return
 
+async def show_contacts_page(query, context, page=0):
+    client = context.bot_data["telethon_client"]
+    tracked_by = query.from_user.id
+
+    result = await client(functions.contacts.GetContactsRequest(
+        hash=0
+    ))
+
+    # Get already-tracked user IDs so we can filter them out
+    already_tracked = {u["user_id"] for u in db.get_active_users(tracked_by)}
+
+    contacts = [
+        user for user in result.users
+        if not getattr(user, "bot", False) and user.id not in already_tracked
+    ]
+
+    # Sort alphabetically
+    contacts.sort(
+        key=lambda u: (
+            (getattr(u, "first_name", "") or "")
+            + " "
+            + (getattr(u, "last_name", "") or "")
+        ).lower()
+    )
+
+    if not contacts:
+        await query.edit_message_text(
+            "✅ All your Telegram contacts are already being tracked!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")]
+            ]),
+            parse_mode="Markdown"
+        )
+        return
+
+    per_page = 20
+    total_pages = max(1, (len(contacts) + per_page - 1) // per_page)
+
+    # Prevent invalid page
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * per_page
+    end = start + per_page
+
+    page_contacts = contacts[start:end]
+
+    keyboard = []
+
+    for user in page_contacts:
+        first = getattr(user, "first_name", "") or ""
+        last = getattr(user, "last_name", "") or ""
+
+        name = f"{first} {last}".strip()
+
+        if not name:
+            name = getattr(user, "username", None) or str(user.id)
+
+        keyboard.append([
+            InlineKeyboardButton(
+                name,
+                callback_data=f"pickcontact_{user.id}"
+            )
+        ])
+
+    # Navigation
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Previous",
+                callback_data=f"contactpage_{page - 1}"
+            )
+        )
+
+    if page < total_pages - 1:
+        navigation.append(
+            InlineKeyboardButton(
+                "Next ➡️",
+                callback_data=f"contactpage_{page + 1}"
+            )
+        )
+
+    if navigation:
+        keyboard.append(navigation)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "❌ Close",
+            callback_data="menu"
+        )
+    ])
+
+    text = (
+        f"📋 **Telegram Contacts**\n\n"
+        f"Page {page + 1}/{total_pages}\n"
+        f"Showing {start + 1}-{min(end, len(contacts))} "
+        f"of {len(contacts)} contacts."
+    )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
 async def _menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -575,14 +800,15 @@ async def _menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # ── Add user ──
-    elif data == "add":
-        await query.edit_message_text(
-            _(lang, "add_prompt"),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(_(lang, "cancel"), callback_data="menu")]
-            ]),
-        )
-        return WAIT_USERNAME
+    if data == "add":
+        try:
+            await show_contacts_page(query, context, 0)
+        except Exception as e:
+            print(f"[add] Error: {e}")
+            await query.edit_message_text(
+                f"❌ Could not load Telegram contacts:\n{e}"
+            )
+        return
 
     # ── Settings ──
     elif data == "settings":
@@ -691,6 +917,52 @@ async def _menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import os as _os
         _os.system("systemctl restart tg-online-tracker &")
 
+    elif data.startswith("contactpage_"):
+        page = int(data.split("_", 1)[1])
+
+        try:
+            await show_contacts_page(query, context, page)
+        except Exception as e:
+            print(f"[contacts] Page error: {e}")
+            await query.edit_message_text(
+                f"❌ Could not load contacts:\n{e}"
+            )
+
+        return
+    
+    elif data.startswith("pickcontact_"):
+        user_id = int(data.split("_", 1)[1])
+
+        try:
+            client = context.bot_data["telethon_client"]
+            entity = await client.get_entity(user_id)
+
+            first = getattr(entity, "first_name", "") or ""
+            last = getattr(entity, "last_name", "") or ""
+            name = f"{first} {last}".strip()
+
+            username = getattr(entity, "username", None) or ""
+
+            db.add_user(
+                entity.id,
+                username,
+                name,
+                tracked_by=query.from_user.id
+            )
+
+            # Show success as popup, then re-render the contacts page
+            # so the added contact is removed from the picker
+            await query.answer(f"✅ Added {name} to tracking!", show_alert=True)
+            await show_contacts_page(query, context, 0)
+
+        except Exception as e:
+            print(f"[pickcontact] Error: {e}")
+            await query.edit_message_text(
+                f"❌ Failed to add contact.\n\n{e}"
+            )
+
+        return
+
     # ── v3: User submenu ──────────────────────────────────────────
     elif data.startswith("user_"):
         user_id = int(data.split("_")[1])
@@ -741,9 +1013,6 @@ async def _menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("remove_"):
         user_id = int(data.split("_")[1])
-        if user_id == OWNER_ID:
-            await query.answer("👑 Cannot remove the owner", show_alert=True)
-            return
         name = display(user_id)
         db.remove_user(user_id, current_uid)
         await query.answer(_(lang, "remove_success", name=name), show_alert=True)
@@ -1076,7 +1345,8 @@ async def main():
         "|db_stats|cleanup_db|restart_confirm|do_restart"
         "|stats|ustats_\\d+"
         "|remove_\\d+|ls_\\d+|log_\\d+|log_\\d+_\\S+|date_\\d+_\\S+|wldel_\\d+|unblock_\\d+"
-        "|user_\\d+|notifymode_\\d+|rename_\\d+|mute_\\d+_\\d+|unmute_\\d+|export_\\d+)$"
+        "|contactpage_\d+|pickcontact_\d+" 
+        "|pickcontact_\\d+|user_\\d+|notifymode_\\d+|rename_\\d+|mute_\\d+_\\d+|unmute_\\d+|export_\\d+)$"
     )
 
     rename_conv = ConversationHandler(

@@ -9,4 +9,3 @@ data/
 __pycache__/
 
 # System
-*.service
